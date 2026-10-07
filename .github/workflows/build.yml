@@ -32,14 +32,19 @@ jobs:
           "$SDKMANAGER" "platforms;android-33" "build-tools;33.0.2" "ndk;21.4.7075529" "ndk;26.3.11579264"
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      - name: Prepare signing keystore
+      - name: Prepare signing keystore and API keys
         run: |
           PASS="AyuGramTGWS2026"
           rm -f TMessagesProj/config/extera.jks
           keytool -genkeypair -v -keystore TMessagesProj/config/extera.jks -storepass "$PASS" -alias ayugram -keypass "$PASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=AyuGram, OU=Dev, O=AyuGram, L=Shenzhen, S=GD, C=CN"
-          echo "SIGNING_KEY_STORE_PASSWORD=$PASS" >> local.properties
-          echo "SIGNING_KEY_ALIAS=ayugram" >> local.properties
-          echo "SIGNING_KEY_PASSWORD=$PASS" >> local.properties
+          cat > API_KEYS <<EOF2
+          APP_ID=6
+          APP_HASH=eb06d4abfb49dc3eeb1aeb98ae0f581e
+          MAPS_V2_API=AIzaSyDUMMY_KEY_123456
+          SIGNING_KEY_STORE_PASSWORD=$PASS
+          SIGNING_KEY_ALIAS=ayugram
+          SIGNING_KEY_PASSWORD=$PASS
+          EOF2
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
