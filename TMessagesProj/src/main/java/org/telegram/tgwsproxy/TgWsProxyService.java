@@ -6,7 +6,7 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.net.Uri;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -25,6 +25,7 @@ import java.util.Random;
 /**
  * 内置 TG-WS 代理前台服务：加载 Rust 核心 libtgwsproxy.so，
  * 监听 127.0.0.1:1443，并把本地 MTProto 代理写入 TG 客户端代理列表。
+ * 状态持久化到 SharedPreferences，App 重启后自动恢复。
  */
 public class TgWsProxyService extends Service {
     public static final String TAG = "TgWsProxy";
@@ -39,26 +40,35 @@ public class TgWsProxyService extends Service {
     private static final int NOTIFICATION_ID = 1443;
     private static final String PREFS_NAME = "tgwsproxy_prefs";
     private static final String KEY_SECRET = "secret";
+    private static final String KEY_ENABLED = "enabled";
+    private static final String KEY_LAST_ERROR = "last_error";
+
+    private static final int DEFAULT_PORT = 1443;
 
     private static volatile boolean sRunning;
-    private static volatile int sPort = 1443;
-
-    private String lastBindIp = "127.0.0.1";
-    private int lastPort = 1443;
-    private String lastSecretKey = "";
 
     public static boolean isRunning() {
         return sRunning;
     }
 
-    public static int getPort() {
-        return sPort;
+    public static boolean isEnabled(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getBoolean(KEY_ENABLED, false);
     }
 
-    public static String getSecret() {
-        return ApplicationLoader.applicationContext
-                .getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                .getString(KEY_SECRET, "");
+    public static String getLastError(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_LAST_ERROR, "");
+    }
+
+    public static String getSecret(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_SECRET, "");
+    }
+
+    private static void setEnabled(Context context, boolean enabled) {
+        context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, enabled).apply();
+    }
+
+    private static void setError(Context context, String error) {
+        context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_LAST_ERROR, error).apply();
     }
 
     @Override
@@ -72,10 +82,15 @@ public class TgWsProxyService extends Service {
         String action = intent != null ? intent.getAction() : null;
         if (ACTION_STOP.equals(action)) {
             stopProxy();
+        } else if (ACTION_START.equals(action)) {
+            startProxy(intent.getStringExtra(EXTRA_BIND_IP), intent.getIntExtra(EXTRA_PORT, DEFAULT_PORT));
         } else {
-            String bindIp = intent != null ? intent.getStringExtra(EXTRA_BIND_IP) : null;
-            int port = intent != null ? intent.getIntExtra(EXTRA_PORT, 1443) : 1443;
-            startProxy(bindIp != null ? bindIp : "127.0.0.1", port);
+            // Service restarted by the system: restore from persisted state
+            if (isEnabled(this) && !sRunning) {
+                startProxy("127.0.0.1", DEFAULT_PORT);
+            } else {
+                stopSelf();
+            }
         }
         return START_REDELIVER_INTENT;
     }
@@ -84,8 +99,7 @@ public class TgWsProxyService extends Service {
         if (sRunning) {
             return;
         }
-        lastBindIp = bindIp;
-        lastPort = port;
+        setError(this, "");
 
         Notification notification = buildNotification("TG-WS 代理启动中…");
         startForeground(NOTIFICATION_ID, notification);
@@ -93,36 +107,58 @@ public class TgWsProxyService extends Service {
         Thread thread = new Thread(() -> {
             try {
                 if (!isPortAvailable(bindIp, port)) {
-                    Log.e(TAG, "port " + port + " not available");
-                    updateNotification("端口被占用");
+                    String err = "端口 " + port + " 被占用，无法启动";
+                    Log.e(TAG, err);
+                    setError(TgWsProxyService.this, err);
+                    updateNotification("启动失败：" + err);
                     stopProxy();
                     return;
                 }
                 String secret = ensureSecret();
-                lastSecretKey = secret;
                 File cacheDir = new File(getCacheDir(), "cfproxy");
                 if (!cacheDir.exists()) {
                     cacheDir.mkdirs();
                 }
-                TgWsProxyNative.INSTANCE.SetPoolSize(4);
-                TgWsProxyNative.INSTANCE.SetCfProxyCacheDir(cacheDir.getAbsolutePath());
-                TgWsProxyNative.INSTANCE.SetCfProxyConfig(1, 1, "");
-                TgWsProxyNative.INSTANCE.SetFixedIpRange("");
-                int result = TgWsProxyNative.INSTANCE.StartProxy(bindIp, port, "", secret, 1);
+                int result;
+                try {
+                    TgWsProxyNative.INSTANCE.SetPoolSize(4);
+                    TgWsProxyNative.INSTANCE.SetCfProxyCacheDir(cacheDir.getAbsolutePath());
+                    TgWsProxyNative.INSTANCE.SetCfProxyConfig(1, 1, "");
+                    TgWsProxyNative.INSTANCE.SetFixedIpRange("");
+                    result = TgWsProxyNative.INSTANCE.StartProxy(bindIp, port, "", secret, 1);
+                } catch (Throwable t) {
+                    String err = "Rust 核心加载/调用失败: " + t.getClass().getSimpleName() + " " + t.getMessage();
+                    Log.e(TAG, err, t);
+                    setError(TgWsProxyService.this, err);
+                    updateNotification("启动失败：" + err);
+                    stopProxy();
+                    return;
+                }
                 if (result == 0) {
                     sRunning = true;
-                    sPort = port;
+                    setEnabled(TgWsProxyService.this, true);
                     injectProxyIntoClient(port, secret);
                     updateNotification("TG-WS 代理运行中 (127.0.0.1:" + port + ")");
                     Log.i(TAG, "proxy ready on " + bindIp + ":" + port);
                 } else {
-                    Log.e(TAG, "StartProxy error code: " + result);
-                    updateNotification("代理启动失败 (错误码 " + result + ")");
+                    String err;
+                    if (result == -1) {
+                        err = "代理已在运行";
+                    } else if (result == -3) {
+                        err = "端口绑定失败";
+                    } else {
+                        err = "内部错误码 " + result;
+                    }
+                    Log.e(TAG, "StartProxy returned " + result + " (" + err + ")");
+                    setError(TgWsProxyService.this, "启动失败：" + err);
+                    updateNotification("启动失败：" + err);
                     stopProxy();
                 }
             } catch (Throwable t) {
-                Log.e(TAG, "startProxy exception", t);
-                updateNotification("代理异常: " + t.getMessage());
+                String err = "代理异常: " + t.getClass().getSimpleName() + " " + t.getMessage();
+                Log.e(TAG, err, t);
+                setError(TgWsProxyService.this, err);
+                updateNotification("异常：" + err);
                 stopProxy();
             }
         });
@@ -132,12 +168,14 @@ public class TgWsProxyService extends Service {
 
     private void stopProxy() {
         sRunning = false;
+        setEnabled(this, false);
+        setError(this, "");
         try {
             TgWsProxyNative.INSTANCE.StopProxy();
         } catch (Throwable t) {
             Log.w(TAG, "StopProxy error", t);
         }
-        removeProxyFromClient(lastPort);
+        removeProxyFromClient(DEFAULT_PORT);
         stopForeground(true);
         stopSelf();
     }
@@ -170,7 +208,7 @@ public class TgWsProxyService extends Service {
         if (secret != null && secret.length() >= 32) {
             return secret;
         }
-        byte[] bytes = new byte[32];
+        byte[] bytes = new byte[16];
         new Random().nextBytes(bytes);
         StringBuilder sb = new StringBuilder();
         for (byte b : bytes) {
@@ -235,7 +273,7 @@ public class TgWsProxyService extends Service {
     private Notification buildNotification(String text) {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(org.telegram.messenger.R.drawable.msg2_proxy_on)
-                .setContentTitle("TG-WS 代理")
+                .setContentTitle("内置 TG-WS 代理")
                 .setContentText(text)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)

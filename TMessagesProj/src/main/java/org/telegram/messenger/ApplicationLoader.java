@@ -302,6 +302,15 @@ public class ApplicationLoader extends Application {
         LauncherIconController.tryFixLauncherIconIfNeeded();
         ProxyRotationController.init();
 
+        // 内置 TG-WS 代理：App 启动时自动恢复上次开启的代理服务
+        if (org.telegram.tgwsproxy.TgWsProxyService.isEnabled(this)) {
+            try {
+                startService(new Intent(this, org.telegram.tgwsproxy.TgWsProxyService.class)
+                        .setAction(org.telegram.tgwsproxy.TgWsProxyService.ACTION_START));
+            } catch (Throwable ignore) {
+            }
+        }
+
         ApplicationLoader app = (ApplicationLoader) ApplicationLoader.applicationContext;
         app.initFirebase();
     }

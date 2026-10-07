@@ -397,11 +397,12 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 TextCheckCell checkCell = (TextCheckCell) view;
                 if (TgWsProxyService.isRunning()) {
                     view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
-                    checkCell.setChecked(false);
                 } else {
                     view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
-                    checkCell.setChecked(true);
                 }
+                // 立即刷新整行：开关状态 + 状态文本
+                listAdapter.notifyItemChanged(tgWsProxyRow, ListAdapter.PAYLOAD_CHECKED_CHANGED);
+                updateRows(true);
             } else if (position == useProxyRow) {
                 if (SharedConfig.currentProxy == null) {
                     if (!proxyList.isEmpty()) {
@@ -920,7 +921,17 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 case VIEW_TYPE_TEXT_CHECK: {
                     TextCheckCell checkCell = (TextCheckCell) holder.itemView;
                     if (position == tgWsProxyRow) {
-                        checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）", TgWsProxyService.isRunning(), false);
+                        boolean enabled = TgWsProxyService.isEnabled(mContext) || TgWsProxyService.isRunning();
+                        String err = TgWsProxyService.getLastError(mContext);
+                        if (TgWsProxyService.isRunning()) {
+                            checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· 运行中 127.0.0.1:1443", true, false);
+                        } else if (enabled) {
+                            checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· 启动中…", true, false);
+                        } else if (err != null && !err.isEmpty()) {
+                            checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· " + err, false, false);
+                        } else {
+                            checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）", false, false);
+                        }
                     } else if (position == useProxyRow) {
                         checkCell.setTextAndCheck(LocaleController.getString("UseProxySettings", R.string.UseProxySettings), useProxySettings, rotationRow != -1);
                     } else if (position == callsRow) {
