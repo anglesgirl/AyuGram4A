@@ -396,10 +396,10 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
             if (position == tgWsProxyRow) {
                 TextCheckCell checkCell = (TextCheckCell) view;
                 if (TgWsProxyService.isRunning()) {
-                    getParentActivity().startService(new Intent(getParentActivity(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
+                    view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
                     checkCell.setChecked(false);
                 } else {
-                    getParentActivity().startService(new Intent(getParentActivity(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
+                    view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
                     checkCell.setChecked(true);
                 }
             } else if (position == useProxyRow) {
