@@ -35,6 +35,7 @@ jobs:
       - name: Prepare signing keystore
         run: |
           PASS="AyuGramTGWS2026"
+          rm -f TMessagesProj/config/extera.jks
           keytool -genkeypair -v -keystore TMessagesProj/config/extera.jks -storepass "$PASS" -alias ayugram -keypass "$PASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=AyuGram, OU=Dev, O=AyuGram, L=Shenzhen, S=GD, C=CN"
           echo "SIGNING_KEY_STORE_PASSWORD=$PASS" >> local.properties
           echo "SIGNING_KEY_ALIAS=ayugram" >> local.properties
