@@ -1,0 +1,65 @@
+name: Build AyuGram with TG-WS Proxy
+
+on:
+  push:
+    branches: [rewrite]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Install Android platform 33, build-tools and NDKs
+        run: |
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | sort -V | tail -n 1)"
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-33" "build-tools;33.0.2" "ndk;21.4.7075529" "ndk;26.3.11579264"
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Prepare signing keystore
+        run: |
+          PASS="AyuGramTGWS2026"
+          keytool -genkeypair -v -keystore TMessagesProj/config/extera.jks -storepass "$PASS" -alias ayugram -keypass "$PASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=AyuGram, OU=Dev, O=AyuGram, L=Shenzhen, S=GD, C=CN"
+          echo "SIGNING_KEY_STORE_PASSWORD=$PASS" >> local.properties
+          echo "SIGNING_KEY_ALIAS=ayugram" >> local.properties
+          echo "SIGNING_KEY_PASSWORD=$PASS" >> local.properties
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Rust proxy core (libtgwsproxy.so)
+        run: |
+          cd TMessagesProj/tgwsproxy
+          cargo ndk -t arm64-v8a --platform 24 -o ../jniLibs build --release
+
+      - name: Build debug APK
+        run: |
+          ./gradlew :TMessagesProj:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ayugram-tgwsproxy-debug
+          path: TMessagesProj/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

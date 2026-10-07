@@ -45,6 +45,7 @@ import org.telegram.messenger.ProxyRotationController;
 import org.telegram.messenger.R;
 import org.telegram.messenger.SharedConfig;
 import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgwsproxy.TgWsProxyService;
 import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenu;
 import org.telegram.ui.ActionBar.ActionBarMenuItem;
@@ -85,6 +86,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     private boolean useProxyForCalls;
 
     private int rowCount;
+    private int tgWsProxyRow;
     private int useProxyRow;
     private int useProxyShadowRow;
     private int connectionsHeaderRow;
@@ -391,7 +393,16 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         frameLayout.addView(listView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.TOP | Gravity.LEFT));
         listView.setAdapter(listAdapter);
         listView.setOnItemClickListener((view, position) -> {
-            if (position == useProxyRow) {
+            if (position == tgWsProxyRow) {
+                TextCheckCell checkCell = (TextCheckCell) view;
+                if (TgWsProxyService.isRunning()) {
+                    getParentActivity().startService(new Intent(getParentActivity(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
+                    checkCell.setChecked(false);
+                } else {
+                    getParentActivity().startService(new Intent(getParentActivity(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
+                    checkCell.setChecked(true);
+                }
+            } else if (position == useProxyRow) {
                 if (SharedConfig.currentProxy == null) {
                     if (!proxyList.isEmpty()) {
                         SharedConfig.currentProxy = proxyList.get(0);
@@ -623,6 +634,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
 
     private void updateRows(boolean notify) {
         rowCount = 0;
+        tgWsProxyRow = rowCount++;
         useProxyRow = rowCount++;
         if (useProxySettings && SharedConfig.currentProxy != null && SharedConfig.proxyList.size() > 1 && IS_PROXY_ROTATION_AVAILABLE) {
             rotationRow = rowCount++;
@@ -907,7 +919,9 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 }
                 case VIEW_TYPE_TEXT_CHECK: {
                     TextCheckCell checkCell = (TextCheckCell) holder.itemView;
-                    if (position == useProxyRow) {
+                    if (position == tgWsProxyRow) {
+                        checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）", TgWsProxyService.isRunning(), false);
+                    } else if (position == useProxyRow) {
                         checkCell.setTextAndCheck(LocaleController.getString("UseProxySettings", R.string.UseProxySettings), useProxySettings, rotationRow != -1);
                     } else if (position == callsRow) {
                         checkCell.setTextAndCheck(LocaleController.getString("UseProxyForCalls", R.string.UseProxyForCalls), useProxyForCalls, false);
@@ -1044,6 +1058,8 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
             // Random stable ids, could be anything non-repeating
             if (position == useProxyShadowRow) {
                 return -1;
+            } else if (position == tgWsProxyRow) {
+                return -15;
             } else if (position == proxyShadowRow) {
                 return -2;
             } else if (position == proxyAddRow) {
@@ -1075,7 +1091,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 return VIEW_TYPE_SHADOW;
             } else if (position == proxyAddRow || position == deleteAllRow) {
                 return VIEW_TYPE_TEXT_SETTING;
-            } else if (position == useProxyRow || position == rotationRow || position == callsRow) {
+            } else if (position == useProxyRow || position == rotationRow || position == callsRow || position == tgWsProxyRow) {
                 return VIEW_TYPE_TEXT_CHECK;
             } else if (position == connectionsHeaderRow) {
                 return VIEW_TYPE_HEADER;

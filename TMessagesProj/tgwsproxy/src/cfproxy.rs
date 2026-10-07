@@ -1,0 +1,747 @@
+use crate::config::*;
+use base64::Engine as _;
+use crate::ws::{is_http_status_error, ws_connect_once, RawWebSocket, WsError};
+use crate::{ldebug, lerror, linfo, lwarn};
+use serde::Deserialize;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+
+use once_cell::sync::Lazy;
+static CFPROXY_SEM: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(CFPROXY_GLOBAL_PARALLEL));
+
+// ---------------------------------------------------------------------------
+// Domain decoding
+// ---------------------------------------------------------------------------
+
+pub fn decode_cf_domain(s: &str) -> String {
+    if !s.ends_with(".com") {
+        return s.to_string();
+    }
+    let suffix = ".co.uk";
+    let p = &s[..s.len() - 4];
+    let mut n = 0i32;
+    for c in p.chars() {
+        if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+            n += 1;
+        }
+    }
+    let mut result: Vec<u8> = Vec::new();
+    for &c in p.as_bytes() {
+        if c >= b'a' && c <= b'z' {
+            let v = (((c - b'a') as i32 - n % 26 + 26) % 26) as u8 + b'a';
+            result.push(v);
+        } else if c >= b'A' && c <= b'Z' {
+            let v = (((c - b'A') as i32 - n % 26 + 26) % 26) as u8 + b'A';
+            result.push(v);
+        } else {
+            result.push(c);
+        }
+    }
+    let mut out = String::from_utf8_lossy(&result).to_string();
+    out.push_str(suffix);
+    out
+}
+
+/// Decode and normalize a domain from the upstream's obfuscated built-in list.
+/// This deliberately retains the upstream `.co.uk` restriction: it is never
+/// used for a domain explicitly supplied by the person using this app.
+pub fn normalize_builtin_cf_domain(s: &str) -> String {
+    let mut decoded = decode_cf_domain(s.trim()).trim().to_lowercase();
+    while decoded.ends_with('.') {
+        decoded.pop();
+    }
+    if decoded.is_empty() || !decoded.ends_with(".co.uk") {
+        return String::new();
+    }
+    decoded
+}
+
+/// Normalize a self-hosted Cloudflare base domain.
+///
+/// A custom domain must be a DNS hostname, but it is not limited to any TLD.
+/// The proxy will connect to `kws<dc>.<domain>` with that hostname as SNI.
+pub fn normalize_user_cf_domain(s: &str) -> String {
+    let mut domain = s.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return String::new();
+    }
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return String::new();
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.iter().any(|label| {
+        label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    }) {
+        return String::new();
+    }
+    domain
+}
+
+pub fn default_cfproxy_domains() -> Vec<String> {
+    let mut domains = Vec::with_capacity(CFPROXY_ENC.len());
+    for enc in CFPROXY_ENC {
+        let d = normalize_builtin_cf_domain(enc);
+        if !d.is_empty() {
+            domains.push(d);
+        }
+    }
+    domains
+}
+
+pub fn merge_cfproxy_domains(lists: &[Vec<String>]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    for list in lists {
+        for raw in list {
+            let d = normalize_builtin_cf_domain(raw);
+            if d.is_empty() || seen.contains(&d) {
+                continue;
+            }
+            seen.insert(d.clone());
+            merged.push(d);
+        }
+    }
+    merged
+}
+
+// ---------------------------------------------------------------------------
+// 429 cooldown logic
+// ---------------------------------------------------------------------------
+
+pub fn clear_cfproxy_429_cooldowns() {
+    CFPROXY_429.write().clear();
+}
+
+pub fn clear_cfproxy_429_cooldown(domain: &str) {
+    let d = normalize_builtin_cf_domain(domain);
+    if d.is_empty() {
+        return;
+    }
+    CFPROXY_429.write().remove(&d);
+}
+
+pub fn retry_after_delay(err: &WsError) -> Duration {
+    let h = match err.handshake() {
+        Some(h) => h,
+        None => return Duration::ZERO,
+    };
+    let retry_after = h.headers.get("retry-after").map(|s| s.trim()).unwrap_or("");
+    if retry_after.is_empty() {
+        return Duration::ZERO;
+    }
+    if let Ok(seconds) = retry_after.parse::<i64>() {
+        if seconds > 0 {
+            return Duration::from_secs(seconds as u64);
+        }
+    }
+    // HTTP date 解析（尽力而为）：跳过此低概率场景
+    Duration::ZERO
+}
+
+pub fn next_cfproxy_429_cooldown_delay(prev: &Cfproxy429State, retry_after: Duration) -> Duration {
+    if retry_after > Duration::ZERO {
+        if retry_after > CFPROXY_429_MAX_COOLDOWN {
+            return CFPROXY_429_MAX_COOLDOWN;
+        }
+        return retry_after;
+    }
+    let mut strikes = prev.strikes;
+    let expired = match prev.until {
+        None => true,
+        Some(u) => u.elapsed() > CFPROXY_429_MAX_COOLDOWN,
+    };
+    if expired {
+        strikes = 0;
+    }
+    let mut delay = CFPROXY_429_COOLDOWN;
+    for _ in 0..strikes {
+        delay *= 2;
+        if delay >= CFPROXY_429_MAX_COOLDOWN {
+            return CFPROXY_429_MAX_COOLDOWN;
+        }
+    }
+    if delay > CFPROXY_429_MAX_COOLDOWN {
+        return CFPROXY_429_MAX_COOLDOWN;
+    }
+    delay
+}
+
+pub fn mark_cfproxy_429_cooldown(domain: &str, err: &WsError) {
+    let d = normalize_builtin_cf_domain(domain);
+    if d.is_empty() {
+        return;
+    }
+    let retry_after = retry_after_delay(err);
+    let mut map = CFPROXY_429.write();
+    let prev = map.get(&d).cloned().unwrap_or_default();
+    let delay = next_cfproxy_429_cooldown_delay(&prev, retry_after);
+    let mut strikes = prev.strikes + 1;
+    let expired = match prev.until {
+        None => true,
+        Some(u) => u.elapsed() > CFPROXY_429_MAX_COOLDOWN,
+    };
+    if expired {
+        strikes = 1;
+    }
+    map.insert(
+        d.clone(),
+        Cfproxy429State {
+            until: Some(Instant::now() + delay),
+            strikes,
+        },
+    );
+    drop(map);
+    ldebug!(" CF cooldown {}: {:.0}s after 429", d, delay.as_secs_f64().ceil());
+}
+
+pub fn cfproxy_429_cooldown_remaining(domain: &str) -> Duration {
+    let d = normalize_builtin_cf_domain(domain);
+    if d.is_empty() {
+        return Duration::ZERO;
+    }
+    let map = CFPROXY_429.read();
+    let state = match map.get(&d) {
+        Some(s) => s.clone(),
+        None => return Duration::ZERO,
+    };
+    drop(map);
+    let until = match state.until {
+        Some(u) => u,
+        None => return Duration::ZERO,
+    };
+    let now = Instant::now();
+    if until <= now {
+        CFPROXY_429.write().remove(&d);
+        return Duration::ZERO;
+    }
+    until - now
+}
+
+pub async fn acquire_cfproxy_attempt_slot() -> Option<tokio::sync::SemaphorePermit<'static>> {
+    CFPROXY_SEM.acquire().await.ok()
+}
+
+// ---------------------------------------------------------------------------
+// Cache files
+// ---------------------------------------------------------------------------
+
+fn cfproxy_cache_path() -> Option<PathBuf> {
+    let dir = CFPROXY.read().cache_dir.trim().to_string();
+    if dir.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(dir).join(CFPROXY_CACHE_FILE_NAME))
+}
+
+// 活动域名不再保存到单独文件，均衡器在内存中工作。
+
+fn load_cfproxy_domains_from_cache() -> Vec<String> {
+    let path = match cfproxy_cache_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let list: Vec<String> = data.split('\n').map(|s| s.to_string()).collect();
+    merge_cfproxy_domains(&[list])
+}
+
+
+
+fn save_cfproxy_domains_to_cache(domains: &[String]) {
+    let path = match cfproxy_cache_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if domains.is_empty() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            ldebug!(" CF: 缓存创建失败: {}", e);
+            return;
+        }
+    }
+    let data = domains.join("\n");
+    if let Err(e) = std::fs::write(&path, data) {
+        ldebug!(" CF: 缓存保存失败: {}", e);
+    }
+}
+
+
+
+fn should_refresh_cfproxy_domains() -> bool {
+    let path = match cfproxy_cache_path() {
+        Some(p) => p,
+        None => return true,
+    };
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return true,
+    };
+    let modified = match meta.modified() {
+        Ok(t) => t,
+        Err(_) => return true,
+    };
+    match modified.elapsed() {
+        Ok(elapsed) => elapsed >= CFPROXY_REFRESH_INTERVAL,
+        Err(_) => true,
+    }
+}
+
+
+
+pub fn init_cfproxy_domains() {
+    let defaults = default_cfproxy_domains();
+    let cached = load_cfproxy_domains_from_cache();
+
+    let mut cfg = CFPROXY.write();
+    if !cfg.user_domain.is_empty() {
+        let ud = cfg.user_domain.clone();
+        cfg.domains = vec![ud.clone()];
+        crate::balancer::BALANCER.write().update_domains_list(&cfg.domains);
+        return;
+    }
+
+    if !cached.is_empty() {
+        let n = cached.len();
+        cfg.domains = merge_cfproxy_domains(&[cached, defaults]);
+        crate::balancer::BALANCER.write().update_domains_list(&cfg.domains);
+        drop(cfg);
+        linfo!(" CF: 域名缓存已加载（{} 个）", n);
+    } else {
+        cfg.domains = defaults;
+        crate::balancer::BALANCER.write().update_domains_list(&cfg.domains);
+    }
+}
+
+pub fn start_cfproxy_refresh() {
+    if !should_refresh_cfproxy_domains() {
+        ldebug!(" CF: 缓存仍新鲜，跳过列表更新");
+        return;
+    }
+    tokio::spawn(async move {
+        for _ in 0..3 {
+            if try_refresh_cfproxy_domains().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        ldebug!(" CF: 更新域名列表失败，沿用缓存/内置列表");
+    });
+}
+
+pub async fn try_refresh_cfproxy_domains() -> bool {
+    let has_user = !CFPROXY.read().user_domain.is_empty();
+    if has_user {
+        return true;
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let resp = match client
+        .get(CFPROXY_DOMAINS_URL)
+        .header("User-Agent", "Mozilla/5.0 tg-ws-proxy-android")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            ldebug!(" CF: GitHub 不可达: {}", e);
+            return false;
+        }
+    };
+    if resp.status().as_u16() != 200 {
+        ldebug!(" CF: GitHub 返回 {}", resp.status().as_u16());
+        return false;
+    }
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            ldebug!(" CF: 读取域名列表失败: {}", e);
+            return false;
+        }
+    };
+
+    let mut new_domains = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let d = normalize_builtin_cf_domain(line);
+        if !d.is_empty() {
+            new_domains.push(d);
+        }
+    }
+
+    if !new_domains.is_empty() {
+        let merged = merge_cfproxy_domains(&[new_domains.clone(), default_cfproxy_domains()]);
+        {
+            let mut cfg = CFPROXY.write();
+            if !cfg.user_domain.is_empty() {
+                return true;
+            }
+            cfg.domains = merged.clone();
+        }
+        crate::balancer::BALANCER.write().update_domains_list(&merged);
+        save_cfproxy_domains_to_cache(&merged);
+        linfo!(" CF: 域名列表已更新（{} 个）", new_domains.len());
+        return true;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// DNS over HTTPS (DoH) resolve
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct DohAnswer {
+    #[serde(rename = "data")]
+    data: String,
+    #[serde(rename = "type")]
+    type_: i32,
+}
+#[derive(Deserialize)]
+struct DohResponse {
+    #[serde(rename = "Answer", default)]
+    answer: Vec<DohAnswer>,
+}
+
+static DOH_CACHE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, (String, Instant)>>> =
+    Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+// 境内 (CN) DoH 可用裸 IP 访问：无需解析其域名，
+// 因此在 DNS 被压缩/篡改时依然可用。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DohKind {
+    // Ali：/dns-query 只接受有线格式（dns=），/resolve 才是 JSON。
+    Json,
+    // RFC 8484 GET ?dns=<base64url> (Tencent, Volcengine, Ali /dns-query).
+    Wire,
+}
+
+/// 构造 A/IN DNS 查询并编码为 base64url（无填充）。
+fn build_dns_query_b64(domain: &str) -> Option<String> {
+    let mut q: Vec<u8> = Vec::with_capacity(64);
+    q.extend_from_slice(&[0x12, 0x34]);
+    q.extend_from_slice(&[0x01, 0x00]);
+    q.extend_from_slice(&[0x00, 0x01]);
+    q.extend_from_slice(&[0x00, 0x00]);
+    q.extend_from_slice(&[0x00, 0x00]);
+    q.extend_from_slice(&[0x00, 0x00]);
+    for label in domain.trim_end_matches('.').split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        q.push(label.len() as u8);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.push(0);
+    q.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+    Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&q))
+}
+
+/// 从有线 DNS 响应中取出 IPv4 地址。
+fn parse_a_records(buf: &[u8]) -> Vec<String> {
+    fn skip_name(buf: &[u8], mut pos: usize) -> usize {
+        loop {
+            if pos >= buf.len() {
+                return pos;
+            }
+            let len = buf[pos] as usize;
+            if len == 0 {
+                return pos + 1;
+            }
+            if len & 0xC0 == 0xC0 {
+                return pos + 2;
+            }
+            pos += 1 + len;
+        }
+    }
+
+    if buf.len() < 12 {
+        return Vec::new();
+    }
+    let qd = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let an = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let mut pos = 12usize;
+
+    for _ in 0..qd {
+        pos = skip_name(buf, pos);
+        if pos + 4 > buf.len() {
+            return Vec::new();
+        }
+        pos += 4;
+    }
+
+    let mut out = Vec::new();
+    for _ in 0..an {
+        pos = skip_name(buf, pos);
+        if pos + 10 > buf.len() {
+            break;
+        }
+        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let rdlen = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlen > buf.len() {
+            break;
+        }
+        if rtype == 1 && rdlen == 4 {
+            out.push(format!(
+                "{}.{}.{}.{}",
+                buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]
+            ));
+        }
+        pos += rdlen;
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn pick_preferred_ip(candidates: &[String]) -> String {
+    let mut fallback_v6 = String::new();
+    for c in candidates {
+        let c = c.trim();
+        if let Ok(ip) = c.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(v4) => return v4.to_string(),
+                std::net::IpAddr::V6(v6) => {
+                    if fallback_v6.is_empty() {
+                        fallback_v6 = v6.to_string();
+                    }
+                }
+            }
+        }
+    }
+    fallback_v6
+}
+
+pub async fn resolve_doh(domain: &str) -> Option<String> {
+    if let Some((ip, exp)) = DOH_CACHE.read().get(domain).cloned() {
+        if Instant::now() < exp {
+            return Some(ip);
+        }
+    }
+
+    // 裸 IP，不解析域名：阿里云 (223.5.5.5/223.6.6.6)，
+    // 腾讯云 dnspod (1.12.12.12/120.53.53.53), 火山引擎 (180.184.1.1/180.184.2.2).
+    let endpoints: [(&str, DohKind); 6] = [
+        ("https://223.5.5.5/resolve", DohKind::Json),
+        ("https://1.12.12.12/dns-query", DohKind::Json),
+        ("https://180.184.1.1/dns-query", DohKind::Wire),
+        ("https://223.6.6.6/resolve", DohKind::Json),
+        ("https://120.53.53.53/dns-query", DohKind::Json),
+        ("https://180.184.2.2/dns-query", DohKind::Wire),
+    ];
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .ok()?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(endpoints.len());
+    let mut tasks = Vec::new();
+
+    for (u, kind) in endpoints {
+        let client = client.clone();
+        let domain = domain.to_string();
+        let tx = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            let req = match kind {
+                DohKind::Json => client
+                    .get(format!("{}?name={}&type=A", u, domain))
+                    .header("Accept", "application/dns-json"),
+                DohKind::Wire => match build_dns_query_b64(&domain) {
+                    Some(b64) => client
+                        .get(format!("{}?dns={}", u, b64))
+                        .header("Accept", "application/dns-message"),
+                    None => {
+                        let _ = tx.send(None).await;
+                        return;
+                    }
+                },
+            };
+            if let Ok(resp) = req.send().await {
+                if resp.status().as_u16() == 200 {
+                    match kind {
+                        DohKind::Json => {
+                            if let Ok(r) = resp.json::<DohResponse>().await {
+                                for ans in r.answer {
+                                    if ans.type_ == 1 {
+                                        let _ = tx.send(Some(ans.data)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        DohKind::Wire => {
+                            if let Ok(body) = resp.bytes().await {
+                                if let Some(ip) = parse_a_records(&body).first() {
+                                    let _ = tx.send(Some(ip.clone())).await;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = tx.send(None).await;
+        }));
+    }
+
+    // 刻意移除系统 (UDP) 解析器：境内它返回被篡改的
+    // 地址，且常抢在 DoH 之前返回，导致连接失败。
+
+    drop(tx); // 使所有任务完成后 rx.recv() 结束
+
+    let deadline = tokio::time::sleep(Duration::from_millis(1500));
+    tokio::pin!(deadline);
+
+    let mut final_ip = None;
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                break;
+            }
+            msg = rx.recv() => {
+                match msg {
+                    Some(Some(ip)) => {
+                        final_ip = Some(ip);
+                        break;
+                    }
+                    Some(None) => {} // 该任务未找到结果
+                    None => break,   // 所有任务已结束
+                }
+            }
+        }
+    }
+
+    // 取消所有未完成的后续任务（修复泄漏）
+    for t in tasks {
+        t.abort();
+    }
+
+    if let Some(ip) = &final_ip {
+        DOH_CACHE.write().insert(
+            domain.to_string(),
+            (ip.clone(), Instant::now() + Duration::from_secs(300)),
+        );
+    }
+    
+    final_ip
+}
+
+// ---------------------------------------------------------------------------
+// cfConnectDomain
+// ---------------------------------------------------------------------------
+
+fn new_timed_attempt_timeout(base: Duration, phase: Duration) -> Duration {
+    let mut eff = base;
+    if eff <= Duration::ZERO {
+        eff = Duration::from_secs(5);
+    }
+    if eff > phase {
+        eff = phase;
+    }
+    eff
+}
+
+pub async fn cf_connect_domain(
+    domain: &str,
+    path: &str,
+    timeout: f64,
+) -> (Option<RawWebSocket>, String, Option<WsError>) {
+    let path = if path.is_empty() { "/apiws" } else { path };
+
+    let attempt_timeout = crate::ws::ws_connect_timeout(timeout);
+    let mut phase_timeout = attempt_timeout;
+    if phase_timeout > CFPROXY_DIAL_PHASE_TIMEOUT {
+        phase_timeout = CFPROXY_DIAL_PHASE_TIMEOUT;
+    }
+
+    let host_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+    match ws_connect_once(domain, domain, path, host_timeout).await {
+        Ok(ws) => return (Some(ws), String::new(), None),
+        Err(host_err) => {
+            if is_http_status_error(&host_err, 429) {
+                return (None, String::new(), Some(host_err));
+            }
+
+            // 固定 IP 区间：完全不问 DoH，遍历
+            // 用户指定区间内的地址。
+            if fixed_ip_range_active() {
+                let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+                let candidates = fixed_range_next_ips(FIXED_IP_TRIES_PER_CONNECT);
+                let mut last_err = host_err;
+                let mut tried: Vec<String> = Vec::new();
+                for ip in candidates {
+                    tried.push(ip.clone());
+                    match ws_connect_once(&ip, domain, path, ip_timeout).await {
+                        Ok(ws) => {
+                            set_fixed_ip_last_good(&ip);
+                            ldebug!(" CF fixed {} ok via {}", domain, ip);
+                            return (Some(ws), ip, None);
+                        }
+                        Err(e) => {
+                            if is_http_status_error(&e, 429) {
+                                return (None, String::new(), Some(e));
+                            }
+                            last_err = e;
+                        }
+                    }
+                }
+                ldebug!(
+                    " CF 固定 {} -> 无响应，区间: {}",
+                    domain,
+                    tried.join(",")
+                );
+                return (None, tried.pop().unwrap_or_default(), Some(last_err));
+            }
+
+            let resolved_ip = resolve_doh(domain).await.unwrap_or_default();
+            if resolved_ip.is_empty() {
+                ldebug!(" CF DNS {} -> no result", domain);
+                return (None, String::new(), Some(host_err));
+            }
+            ldebug!(" CF DNS {} -> {}", domain, resolved_ip);
+            let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+            match ws_connect_once(&resolved_ip, domain, path, ip_timeout).await {
+                Ok(ws) => (Some(ws), resolved_ip, None),
+                Err(e) => (None, resolved_ip, Some(e)),
+            }
+        }
+    }
+}
+
+pub fn log_cf_conn_error(msg: &str, err: &WsError) {
+    if let WsError::Io(e) = err {
+        if e.kind() == std::io::ErrorKind::ConnectionReset {
+            return;
+        }
+    }
+    if is_http_status_error(err, 429) {
+        lwarn!("{}", msg);
+    } else {
+        lerror!("{}", msg);
+    }
+}
+
+// 活动域名 set/save
+pub fn set_active_domain_and_save(_chosen: &str) {
+    // 不再用于文件。均衡器在 proxy.rs 内部更新。
+}

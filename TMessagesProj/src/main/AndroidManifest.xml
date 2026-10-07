@@ -569,6 +569,10 @@
         <service
             android:enabled="true"
             android:exported="false"
+            android:name="org.telegram.tgwsproxy.TgWsProxyService" />
+        <service
+            android:enabled="true"
+            android:exported="false"
             android:name="com.google.android.gms.measurement.AppMeasurementService" />
         <service
             android:enabled="true"
