@@ -61,9 +61,9 @@ jobs:
 
       - name: Build arm64 debug APK
         run: |
-          TASKS=$(./gradlew :TMessagesProj:tasks --all | grep -oE "assemble[A-Za-z0-9]*Debug" | grep -i arm64 | head -1)
-          echo "resolved task: ${TASKS:-assembleArm64Debug}"
-          ./gradlew :TMessagesProj:${TASKS:-assembleArm64Debug} --no-daemon --stacktrace
+          ./gradlew :TMessagesProj:tasks --all 2>&1 | grep -iE "assemble|arm64" | head -60
+          echo "=== build ==="
+          ./gradlew :TMessagesProj:assembleArm64Debug --no-daemon --stacktrace 2>&1 | tail -40
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
