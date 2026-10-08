@@ -337,8 +337,7 @@ public class LocaleController {
         languages.add(localeInfo);
         languagesDict.put(localeInfo.shortName, localeInfo);
 
-        // 简体中文：内置本地语言（使用打包的 values-zh-rCN 静态资源），
-        // 系统语言为中文时不再依赖远程语言包下载，避免下载失败回退英文
+        // 简体中文兜底：不进语言列表（避免与官方中文重复），仅在无官方中文语言包时由 init 使用
         localeInfo = new LocaleInfo();
         localeInfo.name = "简体中文";
         localeInfo.nameEnglish = "Chinese (Simplified)";
@@ -346,7 +345,6 @@ public class LocaleController {
         localeInfo.pluralLangCode = "zh_CN";
         localeInfo.pathToFile = null;
         localeInfo.builtIn = true;
-        languages.add(localeInfo);
         languagesDict.put("zh_rCN", localeInfo);
         languagesDict.put("zh", localeInfo);
         languagesDict.put("zh_cn", localeInfo);
@@ -408,6 +406,20 @@ public class LocaleController {
 
             if (currentInfo == null && systemDefaultLocale.getLanguage() != null) {
                 currentInfo = getLanguageFromDict(systemDefaultLocale.getLanguage());
+            }
+            // 系统为简体中文时：若命中了内置静态中文(仅代理页key有翻译)，但存在官方中文语言包(全量翻译)，优先官方
+            if (currentInfo != null && currentInfo.builtIn && "zh".equals(systemDefaultLocale.getLanguage())) {
+                LocaleInfo officialZh = null;
+                Collection<LocaleInfo> values = languagesDict.values();
+                for (LocaleInfo li : values) {
+                    if (li != currentInfo && li.getLangCode().toLowerCase().startsWith("zh") && li.serverIndex != Integer.MAX_VALUE) {
+                        officialZh = li;
+                        break;
+                    }
+                }
+                if (officialZh != null) {
+                    currentInfo = officialZh;
+                }
             }
             if (currentInfo == null) {
                 currentInfo = getLanguageFromDict(getLocaleString(systemDefaultLocale));
