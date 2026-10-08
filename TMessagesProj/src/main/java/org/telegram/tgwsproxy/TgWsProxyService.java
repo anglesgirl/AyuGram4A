@@ -66,7 +66,7 @@ public class TgWsProxyService extends Service {
         return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_SECRET, "");
     }
 
-    private static void setEnabled(Context context, boolean enabled) {
+    public static void setEnabled(Context context, boolean enabled) {
         context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, enabled).apply();
     }
 

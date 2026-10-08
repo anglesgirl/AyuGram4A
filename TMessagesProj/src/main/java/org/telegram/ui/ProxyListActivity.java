@@ -782,7 +782,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
             listAdapter.notifyDataSetChanged();
         }
         try {
-            registerReceiver(tgWsStateReceiver, new IntentFilter(TgWsProxyService.ACTION_STATE_CHANGED));
+            getContext().registerReceiver(tgWsStateReceiver, new IntentFilter(TgWsProxyService.ACTION_STATE_CHANGED));
         } catch (Throwable ignore) {
         }
         // 服务在后台异步启动，进入页面后延迟再刷新一次状态行
@@ -798,7 +798,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     public void onPause() {
         super.onPause();
         try {
-            unregisterReceiver(tgWsStateReceiver);
+            getContext().unregisterReceiver(tgWsStateReceiver);
         } catch (Throwable ignore) {
         }
     }
