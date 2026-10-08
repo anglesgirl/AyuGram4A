@@ -400,8 +400,8 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 } else {
                     view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
                 }
-                // 立即刷新整行：开关状态 + 状态文本
-                listAdapter.notifyItemChanged(tgWsProxyRow, ListAdapter.PAYLOAD_CHECKED_CHANGED);
+                // 立即刷新整行：开关状态 + 状态文本（全量刷新，避免 payload 分支不处理该行）
+                listAdapter.notifyItemChanged(tgWsProxyRow);
                 updateRows(true);
             } else if (position == useProxyRow) {
                 if (SharedConfig.currentProxy == null) {
@@ -925,10 +925,10 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                         String err = TgWsProxyService.getLastError(mContext);
                         if (TgWsProxyService.isRunning()) {
                             checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· 运行中 127.0.0.1:1443", true, false);
-                        } else if (enabled) {
-                            checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· 启动中…", true, false);
                         } else if (err != null && !err.isEmpty()) {
                             checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· " + err, false, false);
+                        } else if (enabled) {
+                            checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· 启动中…", true, false);
                         } else {
                             checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）", false, false);
                         }
