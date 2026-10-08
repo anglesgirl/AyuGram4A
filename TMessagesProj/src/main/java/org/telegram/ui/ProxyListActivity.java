@@ -36,6 +36,8 @@ import androidx.recyclerview.widget.ItemTouchHelper;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.DownloadController;
 import org.telegram.messenger.LocaleController;
@@ -76,6 +78,18 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     private static final int MENU_SHARE = 1;
 
     private ListAdapter listAdapter;
+
+    private final BroadcastReceiver tgWsStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            AndroidUtilities.runOnUIThread(() -> {
+                if (listAdapter != null) {
+                    listAdapter.notifyItemChanged(tgWsProxyRow);
+                    updateRows(true);
+                }
+            });
+        }
+    };
     private RecyclerListView listView;
     @SuppressWarnings("FieldCanBeLocal")
     private LinearLayoutManager layoutManager;
@@ -394,11 +408,17 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         listView.setAdapter(listAdapter);
         listView.setOnItemClickListener((view, position) -> {
             if (position == tgWsProxyRow) {
-                TextCheckCell checkCell = (TextCheckCell) view;
-                if (TgWsProxyService.isRunning()) {
-                    view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
-                } else {
-                    view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
+                try {
+                    if (TgWsProxyService.isRunning()) {
+                        view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
+                    } else {
+                        // 乐观标记：立即显示"启动中…"，服务结果会通过广播校正
+                        TgWsProxyService.setEnabled(view.getContext(), true);
+                        view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
+                    }
+                } catch (Throwable t) {
+                    TgWsProxyService.setError(view.getContext(), "启动失败: " + t.getMessage());
+                    TgWsProxyService.setEnabled(view.getContext(), false);
                 }
                 // 立即刷新整行：开关状态 + 状态文本（全量刷新，避免 payload 分支不处理该行）
                 listAdapter.notifyItemChanged(tgWsProxyRow);
@@ -760,6 +780,26 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         super.onResume();
         if (listAdapter != null) {
             listAdapter.notifyDataSetChanged();
+        }
+        try {
+            registerReceiver(tgWsStateReceiver, new IntentFilter(TgWsProxyService.ACTION_STATE_CHANGED));
+        } catch (Throwable ignore) {
+        }
+        // 服务在后台异步启动，进入页面后延迟再刷新一次状态行
+        AndroidUtilities.runOnUIThread(() -> {
+            if (listAdapter != null) {
+                listAdapter.notifyItemChanged(tgWsProxyRow);
+                updateRows(true);
+            }
+        }, 800);
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        try {
+            unregisterReceiver(tgWsStateReceiver);
+        } catch (Throwable ignore) {
         }
     }
 

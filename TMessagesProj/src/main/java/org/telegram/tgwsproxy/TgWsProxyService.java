@@ -32,6 +32,9 @@ public class TgWsProxyService extends Service {
 
     public static final String ACTION_START = "org.telegram.tgwsproxy.START";
     public static final String ACTION_STOP = "org.telegram.tgwsproxy.STOP";
+    public static final String ACTION_STATE_CHANGED = "org.telegram.tgwsproxy.STATE_CHANGED";
+    public static final String EXTRA_STATE = "state";
+    public static final String EXTRA_ERROR = "error";
 
     public static final String EXTRA_BIND_IP = "bindIp";
     public static final String EXTRA_PORT = "port";
@@ -67,7 +70,7 @@ public class TgWsProxyService extends Service {
         context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, enabled).apply();
     }
 
-    private static void setError(Context context, String error) {
+    public static void setError(Context context, String error) {
         context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_LAST_ERROR, error).apply();
     }
 
@@ -110,7 +113,9 @@ public class TgWsProxyService extends Service {
                     String err = "端口 " + port + " 被占用，无法启动";
                     Log.e(TAG, err);
                     setError(TgWsProxyService.this, err);
+                    setEnabled(TgWsProxyService.this, false);
                     updateNotification("启动失败：" + err);
+                    sendStateBroadcast("error", err);
                     stopProxy();
                     return;
                 }
@@ -130,7 +135,9 @@ public class TgWsProxyService extends Service {
                     String err = "Rust 核心加载/调用失败: " + t.getClass().getSimpleName() + " " + t.getMessage();
                     Log.e(TAG, err, t);
                     setError(TgWsProxyService.this, err);
+                    setEnabled(TgWsProxyService.this, false);
                     updateNotification("启动失败：" + err);
+                    sendStateBroadcast("error", err);
                     stopProxy();
                     return;
                 }
@@ -139,6 +146,7 @@ public class TgWsProxyService extends Service {
                     setEnabled(TgWsProxyService.this, true);
                     injectProxyIntoClient(port, secret);
                     updateNotification("TG-WS 代理运行中 (127.0.0.1:" + port + ")");
+                    sendStateBroadcast("running", "");
                     Log.i(TAG, "proxy ready on " + bindIp + ":" + port);
                 } else {
                     String err;
@@ -151,14 +159,18 @@ public class TgWsProxyService extends Service {
                     }
                     Log.e(TAG, "StartProxy returned " + result + " (" + err + ")");
                     setError(TgWsProxyService.this, "启动失败：" + err);
+                    setEnabled(TgWsProxyService.this, false);
                     updateNotification("启动失败：" + err);
+                    sendStateBroadcast("error", "启动失败：" + err);
                     stopProxy();
                 }
             } catch (Throwable t) {
                 String err = "代理异常: " + t.getClass().getSimpleName() + " " + t.getMessage();
                 Log.e(TAG, err, t);
                 setError(TgWsProxyService.this, err);
+                setEnabled(TgWsProxyService.this, false);
                 updateNotification("异常：" + err);
+                sendStateBroadcast("error", err);
                 stopProxy();
             }
         });
@@ -166,8 +178,20 @@ public class TgWsProxyService extends Service {
         thread.start();
     }
 
+    private void sendStateBroadcast(String state, String error) {
+        try {
+            Intent i = new Intent(ACTION_STATE_CHANGED);
+            i.setPackage(getPackageName());
+            i.putExtra(EXTRA_STATE, state);
+            i.putExtra(EXTRA_ERROR, error == null ? "" : error);
+            sendBroadcast(i);
+        } catch (Throwable ignore) {
+        }
+    }
+
     private void stopProxy() {
         sRunning = false;
+        sendStateBroadcast("stopped", "");
         setEnabled(this, false);
         setError(this, "");
         try {
