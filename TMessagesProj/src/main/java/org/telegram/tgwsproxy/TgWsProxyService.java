@@ -48,6 +48,7 @@ public class TgWsProxyService extends Service {
     private static final String KEY_LAST_ERROR = "last_error";
     private static final String KEY_LAST_STATE = "last_state";
     private static final String KEY_LAST_STATE_AT = "last_state_at";
+    private static final String KEY_FIXED_IP_RANGE = "fixed_ip_range";
 
     private static final int DEFAULT_PORT = 1443;
 
@@ -73,6 +74,18 @@ public class TgWsProxyService extends Service {
 
     public static long getLastStateAt(Context context) {
         return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getLong(KEY_LAST_STATE_AT, 0L);
+    }
+
+    /** 优选 IP 区间（固定 IP 范围），格式 "104.16.0.1-104.20.255.255"，多个范围逗号分隔。空 = 用 DoH。 */
+    public static String getFixedIpRange(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_FIXED_IP_RANGE, "");
+    }
+
+    public static void setFixedIpRange(Context context, String range) {
+        String trimmed = range == null ? "" : range.trim();
+        context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(KEY_FIXED_IP_RANGE, trimmed).apply();
+        FileLog.d("[TGWS] 保存优选IP区间: '" + trimmed + "'");
     }
 
     public static boolean isRunning() {
@@ -165,8 +178,9 @@ public class TgWsProxyService extends Service {
                     TgWsProxyNative.INSTANCE.SetPoolSize(4);
                     TgWsProxyNative.INSTANCE.SetCfProxyCacheDir(cacheDir.getAbsolutePath());
                     TgWsProxyNative.INSTANCE.SetCfProxyConfig(1, 1, "");
-                    TgWsProxyNative.INSTANCE.SetFixedIpRange("");
-                    FileLog.d("[TGWS] 调用 Rust StartProxy(bind=" + bindIp + ", port=" + port + ")…");
+                    String fixedRange = getFixedIpRange(TgWsProxyService.this);
+                    TgWsProxyNative.INSTANCE.SetFixedIpRange(fixedRange == null ? "" : fixedRange);
+                    FileLog.d("[TGWS] 调用 Rust StartProxy(bind=" + bindIp + ", port=" + port + ", fixedIpRange='" + fixedRange + "')…");
                     result = TgWsProxyNative.INSTANCE.StartProxy(bindIp, port, "", secret, 1);
                     FileLog.d("[TGWS] Rust StartProxy 返回 " + result);
                 } catch (Throwable t) {

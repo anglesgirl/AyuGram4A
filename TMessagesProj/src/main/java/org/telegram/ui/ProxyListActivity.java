@@ -38,6 +38,9 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import android.content.BroadcastReceiver;
 import android.content.IntentFilter;
+import android.text.InputType;
+import android.widget.EditText;
+import android.widget.LinearLayout;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.DownloadController;
 import org.telegram.messenger.FileLog;
@@ -65,6 +68,8 @@ import org.telegram.ui.Cells.TextSettingsCell;
 import org.telegram.ui.Components.CheckBox2;
 import org.telegram.ui.Components.CubicBezierInterpolator;
 import org.telegram.ui.Components.LayoutHelper;
+
+import java.util.Locale;
 import org.telegram.ui.Components.NumberTextView;
 import org.telegram.ui.Components.RecyclerListView;
 import org.telegram.ui.Components.SlideChooseView;
@@ -105,6 +110,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
 
     private int rowCount;
     private int tgWsProxyRow;
+    private int tgWsFixedIpRow;
     private int useProxyRow;
     private int useProxyShadowRow;
     private int connectionsHeaderRow;
@@ -430,6 +436,8 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 // 立即刷新整行：开关状态 + 状态文本（全量刷新，避免 payload 分支不处理该行）
                 listAdapter.notifyItemChanged(tgWsProxyRow);
                 updateRows(true);
+            } else if (position == tgWsFixedIpRow) {
+                showPreferredIpDialog();
             } else if (position == useProxyRow) {
                 if (SharedConfig.currentProxy == null) {
                     if (!proxyList.isEmpty()) {
@@ -660,9 +668,59 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         return true;
     }
 
+    /** 优选 IP 区间编辑对话框：留空 = 自动 DoH 解析；填写后跳过 DoH 循环尝试区间内 IP。 */
+    private void showPreferredIpDialog() {
+        try {
+            AlertDialog.Builder builder = new AlertDialog.Builder(getContext());
+            builder.setTitle(LocaleController.getString("TgwsPreferredIpDialogTitle", R.string.TgwsPreferredIpDialogTitle));
+            LinearLayout layout = new LinearLayout(getContext());
+            layout.setOrientation(LinearLayout.VERTICAL);
+            layout.setPadding(AndroidUtilities.dp(24), 0, AndroidUtilities.dp(24), 0);
+
+            final EditText editText = new EditText(getContext());
+            editText.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+            editText.setSingleLine(false);
+            editText.setMinLines(2);
+            editText.setMaxLines(5);
+            editText.setTextSize(16);
+            editText.setText(TgWsProxyService.getFixedIpRange(getContext()));
+            editText.setHint(LocaleController.getString("TgwsPreferredIpDialogHint", R.string.TgwsPreferredIpDialogHint));
+            editText.setSelection(editText.getText().length());
+            layout.addView(editText, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0, 12, 0, 0));
+
+            TextView info = new TextView(getContext());
+            info.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2));
+            info.setTextSize(14);
+            info.setLineSpacing(AndroidUtilities.dp(3), 1.0f);
+            info.setText(LocaleController.getString("TgwsPreferredIpDialogInfo", R.string.TgwsPreferredIpDialogInfo));
+            layout.addView(info, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, 0, 12, 0, 0));
+
+            builder.setView(layout);
+            builder.setPositiveButton(LocaleController.getString("TgwsPreferredIpDialogSave", R.string.TgwsPreferredIpDialogSave), (dialog, which) -> {
+                String val = editText.getText().toString();
+                TgWsProxyService.setFixedIpRange(getContext(), val);
+                boolean wasRunning = TgWsProxyService.isRunning();
+                listAdapter.notifyItemChanged(tgWsFixedIpRow);
+                updateRows(true);
+                if (wasRunning) {
+                    // 自动重启代理使优选 IP 区间生效
+                    getContext().startService(new Intent(getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
+                    AndroidUtilities.runOnUIThread(() -> {
+                        getContext().startService(new Intent(getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
+                    }, 600);
+                }
+            });
+            builder.setNegativeButton(LocaleController.getString("Cancel", R.string.Cancel), null);
+            showDialog(builder.create());
+        } catch (Throwable t) {
+            FileLog.d("[TGWS-UI] 优选IP对话框异常: " + t.getMessage());
+        }
+    }
+
     private void updateRows(boolean notify) {
         rowCount = 0;
         tgWsProxyRow = rowCount++;
+        tgWsFixedIpRow = rowCount++;
         useProxyRow = rowCount++;
         if (useProxySettings && SharedConfig.currentProxy != null && SharedConfig.proxyList.size() > 1 && IS_PROXY_ROTATION_AVAILABLE) {
             rotationRow = rowCount++;
@@ -951,7 +1009,17 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                 case VIEW_TYPE_TEXT_SETTING: {
                     TextSettingsCell textCell = (TextSettingsCell) holder.itemView;
                     textCell.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-                    if (position == proxyAddRow) {
+                    if (position == tgWsFixedIpRow) {
+                        String range = TgWsProxyService.getFixedIpRange(mContext);
+                        if (range == null || range.isEmpty()) {
+                            textCell.setText(LocaleController.getString("TgwsPreferredIp", R.string.TgwsPreferredIp)
+                                    + " · " + LocaleController.getString("TgwsPreferredIpEmpty", R.string.TgwsPreferredIpEmpty), true);
+                        } else {
+                            textCell.setText(LocaleController.getString("TgwsPreferredIp", R.string.TgwsPreferredIp)
+                                    + " · " + String.format(Locale.US,
+                                    LocaleController.getString("TgwsPreferredIpSet", R.string.TgwsPreferredIpSet), range), true);
+                        }
+                    } else if (position == proxyAddRow) {
                         textCell.setText(LocaleController.getString("AddProxy", R.string.AddProxy), deleteAllRow != -1);
                     } else if (position == deleteAllRow) {
                         textCell.setTextColor(Theme.getColor(Theme.key_text_RedRegular));

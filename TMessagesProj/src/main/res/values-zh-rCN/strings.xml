@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 代理设置页（ProxyListActivity）简体中文翻译 -->
+    <string name="AddProxy">添加代理</string>
+    <string name="Available">可用</string>
+    <string name="Cancel">取消</string>
+    <string name="Checking">检查中…</string>
+    <string name="Connected">已连接</string>
+    <string name="Connecting">连接中…</string>
+    <string name="Delete">删除</string>
+    <string name="DeleteAllProxies">删除所有代理</string>
+    <string name="DeleteAllProxiesConfirm">确定要删除所有代理吗？</string>
+    <string name="DeleteProxyConfirm">确定要删除此代理吗？</string>
+    <string name="DeleteProxyMultiConfirm">确定要删除这些代理吗？</string>
+    <string name="DeleteProxyTitle">删除代理</string>
+    <string name="Edit">编辑</string>
+    <string name="Ping">延迟：%1$d 毫秒</string>
+    <string name="ProxyConnections">连接</string>
+    <string name="ProxyRotationTimeoutInfo">如果当前代理无法连接，可设置切换到最近可用代理的超时时间。</string>
+    <string name="ProxyRotationTimeoutSeconds">%1$d 秒</string>
+    <string name="ProxySettings">代理设置</string>
+    <string name="ShareLink">分享链接</string>
+    <string name="ShareLinks">分享链接</string>
+    <string name="Unavailable">不可用</string>
+    <string name="UseProxyForCalls">通话时使用代理</string>
+    <string name="UseProxyForCallsInfo">使用代理服务器可能会降低通话质量。</string>
+    <string name="UseProxyRotation">自动切换代理</string>
+    <string name="UseProxySettings">使用代理</string>
+
+    <!-- 内置 TG-WS 代理：优选 IP 区间 -->
+    <string name="TgwsPreferredIp">优选 IP 区间</string>
+    <string name="TgwsPreferredIpEmpty">未设置（自动 DoH 解析）</string>
+    <string name="TgwsPreferredIpSet">已设置：%1$s</string>
+    <string name="TgwsPreferredIpDialogTitle">优选 IP 区间</string>
+    <string name="TgwsPreferredIpDialogHint">104.16.0.1-104.20.255.255, 1.1.1.1-1.1.1.255</string>
+    <string name="TgwsPreferredIpDialogInfo">留空 = 使用国内 DoH 解析（阿里/腾讯/火山，纯 IP）。填写后跳过 DoH：按顺序循环尝试该区间内的 IP。多个范围用逗号分隔。</string>
+    <string name="TgwsPreferredIpDialogSave">保存</string>
+</resources>

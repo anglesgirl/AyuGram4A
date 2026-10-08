@@ -6602,4 +6602,12 @@
     <string name="BotWebAppInstantViewOpen">Open App</string>
     <string name="RestorePremiumHintTitle">Get Premium back with up to **%1$d%%** off</string>
     <string name="RestorePremiumHintMessage">Your Telegram Premium has recently expired. Tap here to extend it.</string>
+    <!-- 内置 TG-WS 代理：优选 IP 区间 -->
+    <string name="TgwsPreferredIp">Preferred IP range</string>
+    <string name="TgwsPreferredIpEmpty">Not set (auto DoH)</string>
+    <string name="TgwsPreferredIpSet">Set: %1$s</string>
+    <string name="TgwsPreferredIpDialogTitle">Preferred IP range</string>
+    <string name="TgwsPreferredIpDialogHint">104.16.0.1-104.20.255.255, 1.1.1.1-1.1.1.255</string>
+    <string name="TgwsPreferredIpDialogInfo">Empty — resolve via DoH (Aliyun / Tencent / Volcengine, bare IP). Filled — DoH is skipped: IPs from this range are tried in order, round-robin. Separate several ranges with commas.</string>
+    <string name="TgwsPreferredIpDialogSave">Save</string>
 </resources>
