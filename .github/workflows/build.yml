@@ -12,6 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      JAVA_TOOL_OPTIONS: -Xss16m
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
@@ -61,7 +62,7 @@ jobs:
 
       - name: Build arm64 debug APK
         run: |
-          ./gradlew :TMessagesProj:assembleArm64Debug --no-daemon --stacktrace 2>&1 | tail -40
+          ./gradlew :TMessagesProj:assembleArm64Debug --no-daemon --stacktrace 2>&1 | tail -120
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
