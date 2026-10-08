@@ -337,6 +337,20 @@ public class LocaleController {
         languages.add(localeInfo);
         languagesDict.put(localeInfo.shortName, localeInfo);
 
+        // 简体中文：内置本地语言（使用打包的 values-zh-rCN 静态资源），
+        // 系统语言为中文时不再依赖远程语言包下载，避免下载失败回退英文
+        localeInfo = new LocaleInfo();
+        localeInfo.name = "简体中文";
+        localeInfo.nameEnglish = "Chinese (Simplified)";
+        localeInfo.shortName = "zh-rCN";
+        localeInfo.pluralLangCode = "zh_CN";
+        localeInfo.pathToFile = null;
+        localeInfo.builtIn = true;
+        languages.add(localeInfo);
+        languagesDict.put("zh_rCN", localeInfo);
+        languagesDict.put("zh", localeInfo);
+        languagesDict.put("zh_cn", localeInfo);
+
         loadOtherLanguages();
         if (remoteLanguages.isEmpty()) {
             AndroidUtilities.runOnUIThread(() -> loadRemoteLanguages(UserConfig.selectedAccount));
