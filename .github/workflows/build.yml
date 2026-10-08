@@ -58,11 +58,11 @@ jobs:
       - name: Build Rust proxy core (libtgwsproxy.so)
         run: |
           cd TMessagesProj/tgwsproxy
-          cargo ndk -t arm64-v8a --platform 24 -o ../jniLibs build --release
+          CARGO_BUILD_JOBS=2 cargo ndk -t arm64-v8a --platform 24 -o ../jniLibs build --release
 
       - name: Build arm64 debug APK
         run: |
-          ./gradlew :TMessagesProj:assembleArm64Debug --no-daemon --stacktrace 2>&1 | tail -120
+          ./gradlew :TMessagesProj:assembleArm64Debug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
