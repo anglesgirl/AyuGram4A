@@ -36,8 +36,8 @@ jobs:
       - name: Prepare signing keystore and API keys
         run: |
           PASS="AyuGramTGWS2026"
-          rm -f TMessagesProj/config/extera.jks
-          keytool -genkeypair -v -keystore TMessagesProj/config/extera.jks -storepass "$PASS" -alias ayugram -keypass "$PASS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=AyuGram, OU=Dev, O=AyuGram, L=Shenzhen, S=GD, C=CN"
+          # 固定签名：从 secret 还原 keystore，保证每次构建签名一致、可覆盖安装
+          echo "${{ secrets.EXTERA_KEYSTORE_B64 }}" | base64 -d > TMessagesProj/config/extera.jks
           cat > API_KEYS <<EOF2
           APP_ID=6
           APP_HASH=eb06d4abfb49dc3eeb1aeb98ae0f581e
