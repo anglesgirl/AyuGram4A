@@ -61,8 +61,6 @@ jobs:
 
       - name: Build arm64 debug APK
         run: |
-          ./gradlew :TMessagesProj:tasks --all 2>&1 | grep -iE "assemble|arm64" | head -60
-          echo "=== build ==="
           ./gradlew :TMessagesProj:assembleArm64Debug --no-daemon --stacktrace 2>&1 | tail -40
 
       - name: Upload APK
