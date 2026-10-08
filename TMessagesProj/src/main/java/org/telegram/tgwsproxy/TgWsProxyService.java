@@ -14,6 +14,7 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.messenger.FileLog;
 import org.telegram.messenger.SharedConfig;
 
 import java.io.File;
@@ -45,10 +46,34 @@ public class TgWsProxyService extends Service {
     private static final String KEY_SECRET = "secret";
     private static final String KEY_ENABLED = "enabled";
     private static final String KEY_LAST_ERROR = "last_error";
+    private static final String KEY_LAST_STATE = "last_state";
+    private static final String KEY_LAST_STATE_AT = "last_state_at";
 
     private static final int DEFAULT_PORT = 1443;
 
     private static volatile boolean sRunning;
+
+    /** 统一记录状态机：state = starting/running/error/stopped */
+    public static void setState(Context context, String state, String error) {
+        long at = System.currentTimeMillis();
+        context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(KEY_LAST_STATE, state)
+                .putLong(KEY_LAST_STATE_AT, at)
+                .apply();
+        if (error != null && !error.isEmpty()) {
+            context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putString(KEY_LAST_ERROR, error).apply();
+        }
+        FileLog.d("[TGWS] setState=" + state + " error=" + (error == null ? "" : error));
+    }
+
+    public static String getLastState(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_LAST_STATE, "");
+    }
+
+    public static long getLastStateAt(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getLong(KEY_LAST_STATE_AT, 0L);
+    }
 
     public static boolean isRunning() {
         return sRunning;
@@ -83,13 +108,18 @@ public class TgWsProxyService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent != null ? intent.getAction() : null;
+        FileLog.d("[TGWS] onStartCommand action=" + action + " startId=" + startId);
         if (ACTION_STOP.equals(action)) {
             stopProxy();
         } else if (ACTION_START.equals(action)) {
-            startProxy(intent.getStringExtra(EXTRA_BIND_IP), intent.getIntExtra(EXTRA_PORT, DEFAULT_PORT));
+            String bindIp = intent.getStringExtra(EXTRA_BIND_IP);
+            int port = intent.getIntExtra(EXTRA_PORT, DEFAULT_PORT);
+            FileLog.d("[TGWS] ACTION_START bindIp=" + bindIp + " port=" + port + " sRunning=" + sRunning);
+            startProxy(bindIp == null ? "127.0.0.1" : bindIp, port);
         } else {
             // Service restarted by the system: restore from persisted state
             if (isEnabled(this) && !sRunning) {
+                FileLog.d("[TGWS] 系统重启恢复: enabled=true, 自动启动");
                 startProxy("127.0.0.1", DEFAULT_PORT);
             } else {
                 stopSelf();
@@ -100,25 +130,31 @@ public class TgWsProxyService extends Service {
 
     private void startProxy(final String bindIp, final int port) {
         if (sRunning) {
+            FileLog.d("[TGWS] startProxy 被跳过: sRunning=true");
             return;
         }
         setError(this, "");
+        setState(this, "starting", "");
 
         Notification notification = buildNotification("TG-WS 代理启动中…");
         startForeground(NOTIFICATION_ID, notification);
 
         Thread thread = new Thread(() -> {
+            FileLog.d("[TGWS] 启动线程开始: bind=" + bindIp + " port=" + port);
             try {
                 if (!isPortAvailable(bindIp, port)) {
                     String err = "端口 " + port + " 被占用，无法启动";
                     Log.e(TAG, err);
+                    FileLog.d("[TGWS] 端口预检失败: " + err);
                     setError(TgWsProxyService.this, err);
                     setEnabled(TgWsProxyService.this, false);
+                    setState(TgWsProxyService.this, "error", err);
                     updateNotification("启动失败：" + err);
                     sendStateBroadcast("error", err);
                     stopProxy();
                     return;
                 }
+                FileLog.d("[TGWS] 端口预检通过 " + bindIp + ":" + port);
                 String secret = ensureSecret();
                 File cacheDir = new File(getCacheDir(), "cfproxy");
                 if (!cacheDir.exists()) {
@@ -130,12 +166,16 @@ public class TgWsProxyService extends Service {
                     TgWsProxyNative.INSTANCE.SetCfProxyCacheDir(cacheDir.getAbsolutePath());
                     TgWsProxyNative.INSTANCE.SetCfProxyConfig(1, 1, "");
                     TgWsProxyNative.INSTANCE.SetFixedIpRange("");
+                    FileLog.d("[TGWS] 调用 Rust StartProxy(bind=" + bindIp + ", port=" + port + ")…");
                     result = TgWsProxyNative.INSTANCE.StartProxy(bindIp, port, "", secret, 1);
+                    FileLog.d("[TGWS] Rust StartProxy 返回 " + result);
                 } catch (Throwable t) {
                     String err = "Rust 核心加载/调用失败: " + t.getClass().getSimpleName() + " " + t.getMessage();
                     Log.e(TAG, err, t);
+                    FileLog.d("[TGWS] Rust 调用异常: " + err);
                     setError(TgWsProxyService.this, err);
                     setEnabled(TgWsProxyService.this, false);
+                    setState(TgWsProxyService.this, "error", err);
                     updateNotification("启动失败：" + err);
                     sendStateBroadcast("error", err);
                     stopProxy();
@@ -146,6 +186,7 @@ public class TgWsProxyService extends Service {
                     setEnabled(TgWsProxyService.this, true);
                     injectProxyIntoClient(port, secret);
                     updateNotification("TG-WS 代理运行中 (127.0.0.1:" + port + ")");
+                    setState(TgWsProxyService.this, "running", "");
                     sendStateBroadcast("running", "");
                     Log.i(TAG, "proxy ready on " + bindIp + ":" + port);
                 } else {
@@ -160,6 +201,7 @@ public class TgWsProxyService extends Service {
                     Log.e(TAG, "StartProxy returned " + result + " (" + err + ")");
                     setError(TgWsProxyService.this, "启动失败：" + err);
                     setEnabled(TgWsProxyService.this, false);
+                    setState(TgWsProxyService.this, "error", "启动失败：" + err);
                     updateNotification("启动失败：" + err);
                     sendStateBroadcast("error", "启动失败：" + err);
                     stopProxy();
@@ -167,8 +209,10 @@ public class TgWsProxyService extends Service {
             } catch (Throwable t) {
                 String err = "代理异常: " + t.getClass().getSimpleName() + " " + t.getMessage();
                 Log.e(TAG, err, t);
+                FileLog.d("[TGWS] 线程异常: " + err);
                 setError(TgWsProxyService.this, err);
                 setEnabled(TgWsProxyService.this, false);
+                setState(TgWsProxyService.this, "error", err);
                 updateNotification("异常：" + err);
                 sendStateBroadcast("error", err);
                 stopProxy();
@@ -180,20 +224,24 @@ public class TgWsProxyService extends Service {
 
     private void sendStateBroadcast(String state, String error) {
         try {
+            FileLog.d("[TGWS] 发送状态广播 state=" + state + " error=" + (error == null ? "" : error));
             Intent i = new Intent(ACTION_STATE_CHANGED);
             i.setPackage(getPackageName());
             i.putExtra(EXTRA_STATE, state);
             i.putExtra(EXTRA_ERROR, error == null ? "" : error);
             sendBroadcast(i);
         } catch (Throwable ignore) {
+            FileLog.d("[TGWS] 发送状态广播失败: " + ignore.getMessage());
         }
     }
 
     private void stopProxy() {
+        FileLog.d("[TGWS] stopProxy sRunning=" + sRunning);
         sRunning = false;
         sendStateBroadcast("stopped", "");
         setEnabled(this, false);
         setError(this, "");
+        setState(this, "stopped", "");
         try {
             TgWsProxyNative.INSTANCE.StopProxy();
         } catch (Throwable t) {
@@ -206,6 +254,7 @@ public class TgWsProxyService extends Service {
 
     @Override
     public void onDestroy() {
+        FileLog.d("[TGWS] onDestroy sRunning=" + sRunning);
         sRunning = false;
         super.onDestroy();
     }

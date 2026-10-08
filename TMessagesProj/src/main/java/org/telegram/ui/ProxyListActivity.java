@@ -40,6 +40,7 @@ import android.content.BroadcastReceiver;
 import android.content.IntentFilter;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.DownloadController;
+import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.NotificationCenter;
@@ -82,6 +83,9 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
     private final BroadcastReceiver tgWsStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            String state = intent.getStringExtra(TgWsProxyService.EXTRA_STATE);
+            String error = intent.getStringExtra(TgWsProxyService.EXTRA_ERROR);
+            FileLog.d("[TGWS-UI] 收到状态广播 state=" + state + " error=" + (error == null ? "" : error));
             AndroidUtilities.runOnUIThread(() -> {
                 if (listAdapter != null) {
                     listAdapter.notifyItemChanged(tgWsProxyRow);
@@ -410,13 +414,16 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
             if (position == tgWsProxyRow) {
                 try {
                     if (TgWsProxyService.isRunning()) {
+                        FileLog.d("[TGWS-UI] 点击开关: 停止");
                         view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_STOP));
                     } else {
+                        FileLog.d("[TGWS-UI] 点击开关: 启动 (isRunning=false)");
                         // 乐观标记：立即显示"启动中…"，服务结果会通过广播校正
                         TgWsProxyService.setEnabled(view.getContext(), true);
                         view.getContext().startService(new Intent(view.getContext(), TgWsProxyService.class).setAction(TgWsProxyService.ACTION_START));
                     }
                 } catch (Throwable t) {
+                    FileLog.d("[TGWS-UI] 点击开关异常: " + t.getMessage());
                     TgWsProxyService.setError(view.getContext(), "启动失败: " + t.getMessage());
                     TgWsProxyService.setEnabled(view.getContext(), false);
                 }
@@ -788,6 +795,7 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
         // 服务在后台异步启动，进入页面后延迟再刷新一次状态行
         AndroidUtilities.runOnUIThread(() -> {
             if (listAdapter != null) {
+                FileLog.d("[TGWS-UI] 进入页面延迟刷新状态行");
                 listAdapter.notifyItemChanged(tgWsProxyRow);
                 updateRows(true);
             }
@@ -963,6 +971,9 @@ public class ProxyListActivity extends BaseFragment implements NotificationCente
                     if (position == tgWsProxyRow) {
                         boolean enabled = TgWsProxyService.isEnabled(mContext) || TgWsProxyService.isRunning();
                         String err = TgWsProxyService.getLastError(mContext);
+                        String lastState = TgWsProxyService.getLastState(mContext);
+                        FileLog.d("[TGWS-UI] 渲染状态行: running=" + TgWsProxyService.isRunning()
+                                + " enabled=" + enabled + " state=" + lastState + " err=" + err);
                         if (TgWsProxyService.isRunning()) {
                             checkCell.setTextAndCheck("内置 TG-WS 代理（CF 中转）· 运行中 127.0.0.1:1443", true, false);
                         } else if (err != null && !err.isEmpty()) {
